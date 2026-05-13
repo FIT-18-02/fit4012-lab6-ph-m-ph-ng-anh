@@ -135,3 +135,16 @@ def recv_exact(conn, n: int) -> bytes:
         chunks.append(chunk)
         received += len(chunk)
     return b"".join(chunks)
+
+
+
+
+def parse_key_packet(packet):
+    """Bóc tách gói tin khóa: lấy key và iv"""
+    # 4 byte đầu là độ dài key
+    key_len = struct.unpack('>I', packet[:4])[0]
+    # Lấy key dựa trên độ dài
+    key = packet[4 : 4 + key_len]
+    # 16 byte cuối cùng là IV
+    iv = packet[4 + key_len : 4 + key_len + 16]
+    return key, iv

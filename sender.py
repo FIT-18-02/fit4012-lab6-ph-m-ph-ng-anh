@@ -1,68 +1,54 @@
 import os
 import socket
-from pathlib import Path
+import logging
+from Crypto.Random import get_random_bytes
+from aes_socket_utils import encrypt_aes_cbc, build_key_packet, build_data_packet
 
-from aes_socket_utils import build_data_packet, build_key_packet, encrypt_aes_cbc
+# Cấu hình Logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-SERVER_IP = os.getenv("SERVER_IP", "127.0.0.1")
-DATA_PORT = int(os.getenv("DATA_PORT", "6000"))
-KEY_PORT = int(os.getenv("KEY_PORT", "6001"))
-AES_KEY_SIZE = int(os.getenv("AES_KEY_SIZE", "16"))
-MESSAGE_ENV = os.getenv("MESSAGE")
-INPUT_FILE = os.getenv("INPUT_FILE", "")
-LOG_FILE = os.getenv("SENDER_LOG_FILE", "")
-TIMEOUT = float(os.getenv("SOCKET_TIMEOUT", "10"))
+def run_sender():
+    # 1. Lấy cấu hình từ môi trường
+    server_ip = os.getenv('SERVER_IP', '127.0.0.1')
+    key_port = int(os.getenv('KEY_PORT', 6001))
+    data_port = int(os.getenv('DATA_PORT', 6000))
+    
+    # Lấy nội dung tin nhắn
+    message = os.getenv('MESSAGE', 'Hello from AES Sender')
+    input_file = os.getenv('INPUT_FILE')
+    if input_file and os.path.exists(input_file):
+        with open(input_file, 'rb') as f:
+            data_to_send = f.read()
+    else:
+        data_to_send = message.encode()
 
+    # 2. Sinh Key (16 byte cho AES-128) và IV (16 byte)
+    key = get_random_bytes(16)
+    iv = get_random_bytes(16)
+    logging.info(f"Generated Key: {key.hex()} | IV: {iv.hex()}")
 
-def get_plaintext() -> bytes:
-    """Read plaintext from INPUT_FILE, MESSAGE, or keyboard input."""
-    if INPUT_FILE:
-        return Path(INPUT_FILE).read_bytes()
-    if MESSAGE_ENV is not None:
-        return MESSAGE_ENV.encode("utf-8")
-    return input("Nhập bản tin: ").encode("utf-8")
+    # 3. Kênh Khóa (KEY_PORT)
+    try:
+        with socket.create_connection((server_ip, key_port), timeout=5) as key_sock:
+            key_packet = build_key_packet(key, iv)
+            key_sock.sendall(key_packet)
+            logging.info("Sent Key Packet successfully.")
+    except Exception as e:
+        logging.error(f"Error on Key Channel: {e}")
+        return
 
+    # 4. Mã hóa dữ liệu
+    ciphertext = encrypt_aes_cbc(data_to_send, key, iv)
+    logging.info(f"Ciphertext length: {len(ciphertext)} bytes")
 
-def send_packet(host: str, port: int, packet: bytes) -> None:
-    """Open one TCP connection and send all bytes."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(TIMEOUT)
-        sock.connect((host, port))
-        sock.sendall(packet)
-
-
-def main() -> None:
-    plaintext = get_plaintext()
-    key, iv, ciphertext = encrypt_aes_cbc(plaintext, key_size=AES_KEY_SIZE)
-
-    key_packet = build_key_packet(key, iv)
-    data_packet = build_data_packet(ciphertext)
-
-    send_packet(SERVER_IP, KEY_PORT, key_packet)
-    send_packet(SERVER_IP, DATA_PORT, data_packet)
-
-    lines = [
-        "[+] Đã tạo AES key và IV.",
-        "[+] Đã gửi key/IV qua kênh khóa.",
-        "[+] Đã gửi ciphertext qua kênh dữ liệu.",
-        f"Server: {SERVER_IP}",
-        f"Key port: {KEY_PORT}",
-        f"Data port: {DATA_PORT}",
-        f"AES key size: {len(key)} bytes",
-        f"Key: {key.hex()}",
-        f"IV: {iv.hex()}",
-        f"Plaintext length: {len(plaintext)} bytes",
-        f"Ciphertext length: {len(ciphertext)} bytes",
-        f"Ciphertext: {ciphertext.hex()}",
-    ]
-
-    for line in lines:
-        print(line)
-
-    if LOG_FILE:
-        Path(LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
-        Path(LOG_FILE).write_text("\n".join(lines) + "\n", encoding="utf-8")
-
+    # 5. Kênh Dữ liệu (DATA_PORT)
+    try:
+        with socket.create_connection((server_ip, data_port), timeout=5) as data_sock:
+            data_packet = build_data_packet(ciphertext)
+            data_sock.sendall(data_packet)
+            logging.info("Sent Data Packet successfully.")
+    except Exception as e:
+        logging.error(f"Error on Data Channel: {e}")
 
 if __name__ == "__main__":
-    main()
+    run_sender()

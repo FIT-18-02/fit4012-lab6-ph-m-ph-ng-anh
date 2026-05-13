@@ -1,54 +1,85 @@
 import os
 import socket
-import logging
-from aes_socket_utils import decrypt_aes_cbc, parse_key_packet, recv_exact
+import time
+from pathlib import Path
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+from aes_socket_utils import (
+    build_data_packet,
+    build_key_packet,
+    encrypt_aes_cbc,
+)
 
-def run_receiver():
-    host = os.getenv('RECEIVER_HOST', '0.0.0.0')
-    key_port = int(os.getenv('KEY_PORT', 6001))
-    data_port = int(os.getenv('DATA_PORT', 6000))
-    output_file = os.getenv('OUTPUT_FILE')
+SERVER_IP = os.getenv("SERVER_IP", "127.0.0.1")
+DATA_PORT = int(os.getenv("DATA_PORT", "6000"))
+KEY_PORT = int(os.getenv("KEY_PORT", "6001"))
 
-    key, iv = None, None
+MESSAGE = os.getenv("MESSAGE", "")
+INPUT_FILE = os.getenv("INPUT_FILE", "")
+LOG_FILE = os.getenv("SENDER_LOG_FILE", "")
 
-    # 1. Lắng nghe Kênh Khóa
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as key_sock:
-        key_sock.bind((host, key_port))
-        key_sock.listen(1)
-        logging.info(f"Listening for Key on port {key_port}...")
-        conn, addr = key_sock.accept()
-        with conn:
-            # Nhận 4 byte header độ dài key
-            header = recv_exact(conn, 4)
-            import struct
-            key_len = struct.unpack('>I', header)[0]
-            # Nhận tiếp key và iv (iv luôn 16 bytes)
-            remaining_data = recv_exact(conn, key_len + 16)
-            key, iv = parse_key_packet(header + remaining_data)
-            logging.info(f"Received Key and IV from {addr}")
 
-    # 2. Lắng nghe Kênh Dữ liệu
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as data_sock:
-        data_sock.bind((host, data_port))
-        data_sock.listen(1)
-        logging.info(f"Listening for Data on port {data_port}...")
-        conn, addr = data_sock.accept()
-        with conn:
-            header = recv_exact(conn, 4)
-            cipher_len = struct.unpack('>I', header)[0]
-            ciphertext = recv_exact(conn, cipher_len)
-            
-            # Giải mã
-            plaintext = decrypt_aes_cbc(ciphertext, key, iv)
-            result = plaintext.decode(errors='replace')
-            logging.info(f"Decrypted message: {result}")
+def send_packet(host: str, port: int, packet: bytes) -> None:
+    """
+    Gửi packet qua TCP socket.
+    Có retry để tránh ConnectionRefusedError
+    khi receiver chưa listen kịp.
+    """
+    for _ in range(10):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.connect((host, port))
+                sock.sendall(packet)
+                return
+        except ConnectionRefusedError:
+            time.sleep(0.5)
 
-            if output_file:
-                with open(output_file, 'w', encoding='utf-8') as f:
-                    f.write(result)
-                logging.info(f"Saved output to {output_file}")
+    raise ConnectionRefusedError(
+        f"Không thể kết nối tới {host}:{port}"
+    )
+
+
+def get_plaintext() -> bytes:
+    """Lấy plaintext từ MESSAGE hoặc INPUT_FILE."""
+    if INPUT_FILE:
+        return Path(INPUT_FILE).read_bytes()
+
+    return MESSAGE.encode("utf-8")
+
+
+def main() -> None:
+    plaintext = get_plaintext()
+
+    key, iv, ciphertext = encrypt_aes_cbc(plaintext)
+
+    key_packet = build_key_packet(key, iv)
+    data_packet = build_data_packet(ciphertext)
+
+    send_packet(SERVER_IP, KEY_PORT, key_packet)
+
+    print("[+] Đã gửi key/IV qua kênh khóa.")
+
+    send_packet(SERVER_IP, DATA_PORT, data_packet)
+
+    print("[+] Đã gửi ciphertext qua kênh dữ liệu.")
+
+    print(f"Key: {key.hex()}")
+    print(f"IV: {iv.hex()}")
+    print(f"Ciphertext: {ciphertext.hex()}")
+
+    if LOG_FILE:
+        Path(LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
+
+        Path(LOG_FILE).write_text(
+            "\n".join([
+                "[+] Đã gửi key/IV qua kênh khóa.",
+                "[+] Đã gửi ciphertext qua kênh dữ liệu.",
+                f"Key: {key.hex()}",
+                f"IV: {iv.hex()}",
+                f"Ciphertext: {ciphertext.hex()}",
+            ]) + "\n",
+            encoding="utf-8"
+        )
+
 
 if __name__ == "__main__":
-    run_receiver()
+    main()
